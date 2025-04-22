@@ -617,7 +617,7 @@ if __name__ == "__main__":
 
     try:
         # 创建并启动服务器
-        server = ServerThread(app, host="127.0.0.1", port=12226)
+        server = ServerThread(app, host="0.0.0.0", port=12226)
         server.daemon = True  # 设置为守护线程
         server.start()
         print("服务器已在 http://127.0.0.1:12226 运行...")
