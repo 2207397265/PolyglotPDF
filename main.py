@@ -456,7 +456,7 @@ class main_function:
                 # 先尝试使用 Redact 遮盖
                 try:
                     page.add_redact_annot(rect)
-                    page.apply_redactions()
+                    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
                 except Exception as e:
                     # 若 Redact 失败，改用白色方块覆盖
                     annots = list(page.annots() or [])
@@ -508,7 +508,7 @@ class main_function:
                     angle = block[3] if len(block) > 3 else 0
                     html_color = block[4] if len(block) > 4 else '#000000'
                     text_indent = block[5] if len(block) > 5 else 0
-                    text_size = float(block[7]) + 3 if len(block) > 7 else 12
+                    text_size = float(block[7]) if len(block) > 7 else 12
                     
                     # 使用扩大后的坐标创建矩形
                     rect = fitz.Rect(*enlarged_coords)
@@ -520,6 +520,7 @@ class main_function:
                         color: {html_color};
                         text-indent: {text_indent}pt;  
                         font-size: {text_size}pt; 
+                        line-height: 1.5;
                         word-wrap: break-word;
                         overflow-wrap: break-word;
                         width: 100%;
@@ -569,7 +570,7 @@ class main_function:
                     angle = block[3] if len(block) > 3 else 0
                     html_color = block[4] if len(block) > 4 else '#000000'
                     text_indent = block[5] if len(block) > 5 else 0
-                    text_size = float(block[7]) + 3 if len(block) > 7 else 12
+                    text_size = float(block[7])  if len(block) > 7 else 12
                     
                     # 使用扩大后的坐标创建矩形
                     rect = fitz.Rect(*enlarged_coords)
@@ -581,6 +582,7 @@ class main_function:
                         color: {html_color};
                         text-indent: {text_indent}pt;  
                         font-size: {text_size}pt;
+                        line-height: 1.5;
                         word-wrap: break-word;
                         overflow-wrap: break-word;
                         width: 100%;
