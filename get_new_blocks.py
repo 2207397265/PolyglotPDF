@@ -63,9 +63,11 @@ def horizontal_merge(
         prev_line = merged[-1]
         x0, y0, x1, y1 = line["line_bbox"]
         px0, py0, px1, py1 = prev_line["line_bbox"]
-
+        curr_font_size = line["font_size"] if line["font_size"] else 10
+        prev_font_size = prev_line["font_size"] if prev_line["font_size"] else 10
+        avg_font_size = (curr_font_size+prev_font_size)/2
         # (1) 如果 x、y 轴范围都有交集，就直接合并
-        overlap_y = (y0 <= py1) and (py0 <= y1)
+        overlap_y = (y0 <= py1) and (py0 <= y1) and (abs(y0-py1)>avg_font_size/5)
         overlap_x = (x0 <= px1) and (px0 <= x1)
         merged_this_round = False
 
@@ -102,17 +104,16 @@ def horizontal_merge(
             if not check_font_color:
                 same_font_color_flag = True
 
-            curr_font_size = line["font_size"] if line["font_size"] else 10
-            prev_font_size = prev_line["font_size"] if prev_line["font_size"] else 10
+
 
             if line["font_bold"] and prev_line["font_bold"]:
-                effective_max_gap = (curr_font_size + prev_font_size)
+                effective_max_gap = avg_font_size
             else:
-                effective_max_gap = (curr_font_size + prev_font_size) / 1.7
+                effective_max_gap = avg_font_size
 
             # y轴重叠判据
-            overlap_y = (y0 <= py1) and (py0 <= y1)
-            same_horizontal_line = overlap_y
+
+            same_horizontal_line = abs(py1-y1)<avg_font_size/5   and abs(py0-y0)<avg_font_size/5
 
             horizontal_gap = x0 - px1
             close_enough = (0 <= horizontal_gap < effective_max_gap)
@@ -146,17 +147,65 @@ def horizontal_merge(
             i += 1
 
     # 打印合并后结果
-    for idx, line in enumerate(merged, 1):
-        text = line["text"]
-        bbox = line["line_bbox"]
-        print(f"行 {idx}: text = {text!r}, bbox = {bbox}")
+    # for idx, line in enumerate(merged, 1):
+    #     text = line["text"]
+    #     bbox = line["line_bbox"]
+    #     print(f"水平行 {idx}: text = {text!r}, bbox = {bbox}")
 
     return merged
 
-def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_font_color=True):
+def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_font_color=True,check_same_block=True ):
     """
     垂直方向合并函数（合并后继续检查当前位置，不全量遍历回头）
     支持四种合并逻辑 condition_1 ~ condition_4
+# condition_1: “中间合并豁免”或“包裹型合并（对称）”
+# 说明：当前行左右都被上一行包住，中间至少留 margin_in_middle 空隙，
+# 并且左右包裹“对称性好”（左右两端冗余的差值不能太大），
+# 常见于公式换行、PDF多栏切分等情形，防止“孤行”被误合并进大段。
+condition_1 = (
+    same_block and same_font_size_flag and same_font_name_flag and same_font_color_flag
+    and y_distance_small
+    and (x0 >= px0 + margin_in_middle) and (x1 <= px1 - margin_in_middle)
+    and no_end_indent
+    and abs(abs(x0-px0) - abs(x1-px1)) < max_horizontal_gap
+)
+
+# condition_2: “新逻辑合并”
+# 说明：只要同块、竖直距离和水平距离都很近（左右对齐良好），并且没有末尾缩进，
+# 主要针对“强制换行”、“正文伪换行”等排版产生的断行，适合合并正文连续段落。
+condition_2 = (
+    same_block and y_distance_small and x_distance_small
+    and (abs(px0 - x0) < margin_in_middle) and no_end_indent
+)
+
+# condition_3: “经典合并”或“宽度近似合并”
+# 说明：传统正文合并判据，要求同块、字体等属性接近、左右对齐好、宽度差值极小且无缩进。
+# 主要用于正常正文行的自然换行处理。
+condition_3 = (
+    same_block and y_distance_small and same_font_size_flag and same_font_name_flag and same_font_color_flag
+    and x_distance_small and no_end_indent
+)
+
+# condition_4: “BBox包裹合并（防漏）”
+# 说明：上一行的bbox能完整包裹当前行（含一定容差 tolerance），常用于
+# 脚注、特殊符号、页眉、页脚等特殊情况防止“残留孤行”被遗漏。
+condition_4 = (
+    same_block
+    and (x0 >= px0 - tolerance) and (y0 >= py0 - tolerance)
+    and (x1 <= px1 + tolerance) and (y1 <= py1 + tolerance)
+    and no_end_indent
+)
+
+# condition_5: “二级新逻辑合并/容忍性补充”
+# 说明：同块，竖直距离和水平距离都近，且左边界只比上一行多一点（不过多于2倍gap），
+# 用于捕捉有轻微缩进或特殊段落起始的伪断行，防止漏合并。
+condition_5 = (
+    same_block and y_distance_small and x_distance_small
+    and (px0 - x0) < max_horizontal_gap * 2
+    and no_end_indent
+)
+
+
     """
 
     merged = []
@@ -174,11 +223,15 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
         px0, py0, px1, py1 = prev_line["line_bbox"]
         current_width = (x1 - x0)
         prev_width = (px1 - px0)
+        prev_indent = prev_line['indent']
 
-        # 判断同一块
-        same_block = (line["block_index"] == prev_line["block_index"])
+        # 判断同一块，增加是否启用的开关
+        if check_same_block:
+            same_block = (line["block_index"] == prev_line["block_index"])
+        else:
+            same_block = True  # 不检查时总为True
         # 无缩进
-        no_indent = not line["indent"]
+        no_end_indent = prev_line["end_indent"] == 0
 
         # 字体大小布尔标记
         if check_font_size:
@@ -212,12 +265,19 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
 
         # Y 轴、X 轴距离
         y_distance = (y0 - py1)
-        y_distance_small = (abs(y_distance) < margin_in_middle)
+        y_distance_small = (abs(y_distance) < max_horizontal_gap/1.3)
         horizontal_distance = abs(x0 - px0)
         x_distance_small = (horizontal_distance < max_x_distance)
 
+        thorizontal_distance = abs(current_width - prev_width)
+
+
         # 判断水平/竖直重叠
-        overlap_y = (y0 <= py1) and (py0 <= y1)
+
+        avg_font_size = (curr_font_size+prev_font_size)/2
+
+
+        overlap_y = (y0 <= py1) and (py0 <= y1) and (abs(y0-py1)>avg_font_size/5)
         overlap_x = (x0 <= px1) and (px0 <= x1)
 
         # 合并条件
@@ -225,23 +285,28 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
         condition_1 = (
             same_block and same_font_size_flag and same_font_name_flag and same_font_color_flag
             and y_distance_small and (x0 >= px0 + margin_in_middle) and (x1 <= px1 - margin_in_middle)
-            and no_indent
+            and no_end_indent and abs (abs(x0-px0) - abs(x1-px1)) < max_horizontal_gap
         )
         # condition_2: “新逻辑合并”
         condition_2 = (
             same_block and y_distance_small and x_distance_small
-            and (abs(px0 - x0) < margin_in_middle) and no_indent
+            and (abs(px0 - x0) < margin_in_middle) and no_end_indent and ((current_width - prev_width) < max_horizontal_gap*2)
         )
         # condition_3: “老逻辑合并”
         condition_3 = (
             same_block and y_distance_small and same_font_size_flag and same_font_name_flag and same_font_color_flag
-            and x_distance_small and no_indent
+            and x_distance_small and no_end_indent
         )
         # condition_4: “包裹合并”
         tolerance = max_horizontal_gap / 2
         condition_4 = (
             same_block and (x0 >= px0 - tolerance) and (y0 >= py0 - tolerance)
-            and (x1 <= px1 + tolerance) and (y1 <= py1 + tolerance) and no_indent
+            and (x1 <= px1 + tolerance) and (y1 <= py1 + tolerance) and no_end_indent
+        )
+        # condition_5: “”
+        condition_5 = (
+            same_block and y_distance_small and x_distance_small
+            and (px0-x0)< max_horizontal_gap *2 and no_end_indent and(abs(current_width-prev_width)<max_x_distance)
         )
 
         merged_this_round = False
@@ -251,6 +316,19 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
             # 水平合并
             prev_line["text"] = prev_line["text"].rstrip() + " " + line["text"].lstrip()
 
+            if prev_indent :
+                indent_val = prev_indent
+                # print('当前合并2发的行','上一行：', prev_line["text"],'当前行:',line["text"] )
+            else:
+                if (px0 > x0):
+                    indent_val = px0 - x0
+                else:
+                    indent_val = 0
+
+            end_indent_val = abs(px1 - x1) if (px1 > x1 and abs(px1 - x1) > max_horizontal_gap) else 0
+            merged[-1]["end_indent"] = end_indent_val
+
+            merged[-1]["end_indent"] = end_indent_val
             new_x0 = min(px0, x0)
             new_y0 = min(py0, y0)
             new_x1 = max(px1, x1)
@@ -261,11 +339,12 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
             prev_line["font_bold"] = prev_line["total_bold_chars"] > prev_line["total_nonbold_chars"]
             prev_line["font_names"].extend(line["font_names"])
             prev_line["font_names"] = list(set(prev_line["font_names"]))
-            # print("水平合并文本：", prev_line["text"])
+            merged[-1]["indent"] = indent_val
+
+            # print("重叠合并文本：", prev_line["text"])
             merged_this_round = True
         elif condition_1:
-            indent_val = abs(px0 - x0)
-            merged[-1]["indent"] = indent_val
+
             merged[-1]["text"] = prev_line["text"].rstrip() + " " + line["text"].lstrip()
 
             new_x0 = min(px0, x0)
@@ -280,16 +359,21 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
             merged[-1]["font_names"] = list(set(merged[-1]["font_names"]))
             if line["font_size"] is not None and line["font_size"] > margin_in_middle * 2:
                 merged[-1]["type"] = "title"
-            print('合并1', merged[-1]["text"])
+            # print('合并1', merged[-1]["text"])
             merged_this_round = True
         elif condition_2:
-            if (prev_line["indent"] and not line["indent"]):
-                indent_val = prev_line["indent"]
-            elif (prev_line["indent"] and line["indent"]):
-                indent_val = line["indent"]
+            # 如果上一行已经有缩进，直接继承
+            if prev_indent :
+                indent_val = prev_indent
+                # print('当前合并2发的行','上一行：', prev_line["text"],'当前行:',line["text"] )
             else:
-                indent_val = abs(px0 - x0)
+                if (px0 >x0):
+                    indent_val = px0 - x0
+                else:
+                    indent_val = 0
             merged[-1]["indent"] = indent_val
+            end_indent_val = abs(px1 - x1) if (px1 > x1 and abs(px1 - x1) > max_horizontal_gap) else 0
+            merged[-1]["end_indent"] = end_indent_val
             merged[-1]["text"] = prev_line["text"].rstrip() + " " + line["text"].lstrip()
 
             new_x0 = min(px0, x0)
@@ -302,8 +386,42 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
             merged[-1]["font_bold"] = merged[-1]["total_bold_chars"] > merged[-1]["total_nonbold_chars"]
             merged[-1]["font_names"].extend(line["font_names"])
             merged[-1]["font_names"] = list(set(merged[-1]["font_names"]))
-            print('合并2', merged[-1]["text"])
+            # print('合并2', indent_val ,end_indent_val,px0,x0,prev_line['indent'],merged[-1]["text"])
+            # print("------")
+
             merged_this_round = True
+        elif condition_5:
+
+            # 如果上一行已经有缩进，直接继承
+            if prev_line['indent']:
+                indent_val = prev_line['indent']
+            else:
+                if (px0 > x0) :
+                    indent_val = px0 - x0
+                else:
+                    indent_val = 0
+
+            # 只在明显缩进时生效，否则为0
+
+            merged[-1]["indent"] = indent_val
+
+            end_indent_val = abs(px1 - x1) if (px1 > x1 and abs(px1 - x1) > max_horizontal_gap) else 0
+            merged[-1]["end_indent"] = end_indent_val
+            merged[-1]["text"] = prev_line["text"].rstrip() + " " + line["text"].lstrip()
+
+            new_x0 = min(px0, x0)
+            new_y0 = min(py0, y0)
+            new_x1 = max(px1, x1)
+            new_y1 = max(py1, y1)
+            merged[-1]["line_bbox"] = (new_x0, new_y0, new_x1, new_y1)
+            merged[-1]["total_bold_chars"] += line["total_bold_chars"]
+            merged[-1]["total_nonbold_chars"] += line["total_nonbold_chars"]
+            merged[-1]["font_bold"] = merged[-1]["total_bold_chars"] > merged[-1]["total_nonbold_chars"]
+            merged[-1]["font_names"].extend(line["font_names"])
+            merged[-1]["font_names"] = list(set(merged[-1]["font_names"]))
+            # print('合并5', merged[-1]["text"], indent_val ,end_indent_val)
+            merged_this_round = True
+
         elif condition_3:
             if (x1 - px1) > max_x_distance:
                 merged.append(line)
@@ -312,13 +430,10 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
             width_diff = abs(current_width - prev_width)
             if width_diff <= margin_in_middle / 2.0:
                 merged_text = prev_line["text"].rstrip() + " " + line["text"].lstrip()
-                if (prev_line["indent"] and not line["indent"]):
-                    indent_val = prev_line["indent"]
-                elif (prev_line["indent"] and line["indent"]):
-                    indent_val = line["indent"]
-                else:
-                    indent_val = abs(px0 - x0)
+                indent_val = (x0 - px0) if (x0 > px0 and (x0 - px0) > (max_horizontal_gap / 2)) else 0
                 merged[-1]["indent"] = indent_val
+                end_indent_val = abs(px1 - x1) if (px1 > x1 and abs(px1 - x1) > max_horizontal_gap) else 0
+                merged[-1]["end_indent"] = end_indent_val
                 prev_line["text"] = merged_text
 
 
@@ -332,17 +447,14 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
                 prev_line["font_bold"] = prev_line["total_bold_chars"] > prev_line["total_nonbold_chars"]
                 prev_line["font_names"].extend(line["font_names"])
                 prev_line["font_names"] = list(set(prev_line["font_names"]))
-                print('合并3', merged[-1]["text"])
+                # print('合并3', merged[-1]["text"])
                 merged_this_round = True
             else:
                 if (prev_width < current_width) and (px0 > x0):
-                    if (prev_line["indent"] and not line["indent"]):
-                        indent_val = prev_line["indent"]
-                    elif (prev_line["indent"] and line["indent"]):
-                        indent_val = line["indent"]
-                    else:
-                        indent_val = abs(px0 - x0)
+                    indent_val = (x0 - px0) if (x0 > px0 and (x0 - px0) > (max_horizontal_gap / 2)) else 0
                     merged[-1]["indent"] = indent_val
+                    end_indent_val = abs(px1 - x1) if (px1 > x1 and abs(px1 - x1) > max_horizontal_gap) else 0
+                    merged[-1]["end_indent"] = end_indent_val
                     merged_text = prev_line["text"].rstrip() + " " + line["text"].lstrip()
                     prev_line["text"] = merged_text
 
@@ -357,7 +469,7 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
                     prev_line["font_bold"] = prev_line["total_bold_chars"] > prev_line["total_nonbold_chars"]
                     prev_line["font_names"].extend(line["font_names"])
                     prev_line["font_names"] = list(set(prev_line["font_names"]))
-                    print('合并4', merged[-1]["text"])
+                    # print('合并4', merged[-1]["text"])
                     merged_this_round = True
                 elif (current_width < prev_width) and (x0 >= px0 + 2):
                     merged.append(line)
@@ -365,13 +477,10 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
                     continue
                 else:
                     if prev_width < current_width:
-                        if (prev_line["indent"] and not line["indent"]):
-                            indent_val = prev_line["indent"]
-                        elif (prev_line["indent"] and line["indent"]):
-                            indent_val = line["indent"]
-                        else:
-                            indent_val = abs(px0 - x0)
+                        indent_val = (x0 - px0) if (x0 > px0 and (x0 - px0) > (max_horizontal_gap / 2)) else 0
                         merged[-1]["indent"] = indent_val
+                        end_indent_val = abs(px1 - x1) if (px1 > x1 and abs(px1 - x1) > max_horizontal_gap) else 0
+                        merged[-1]["end_indent"] = end_indent_val
                         merged_text = prev_line["text"].rstrip() + " " + line["text"].lstrip()
                         prev_line["text"] = merged_text
 
@@ -387,6 +496,8 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
                         prev_line["font_names"].extend(line["font_names"])
                         prev_line["font_names"] = list(set(prev_line["font_names"]))
                         merged_this_round = True
+
+
         elif condition_4:
             merged[-1]["text"] = prev_line["text"].rstrip() + " " + line["text"].lstrip()
 
@@ -394,21 +505,20 @@ def merge_lines(lines_data, check_font_size=False, check_font_name=True, check_f
             new_y0 = min(py0, y0)
             new_x1 = max(px1, x1)
             new_y1 = max(py1, y1)
-            if (prev_line["indent"] and not line["indent"]):
-                indent_val = prev_line["indent"]
-            elif (prev_line["indent"] and line["indent"]):
-                indent_val = line["indent"]
-            else:
-                indent_val = abs(px0 - x0)
+            indent_val = (x0 - px0) if (x0 > px0 and (x0 - px0) > (max_horizontal_gap / 2) )else 0
             merged[-1]["indent"] = indent_val
+            end_indent_val = abs(px1 - x1) if (px1 > x1 and abs(px1 - x1) > max_horizontal_gap) else 0
+            merged[-1]["end_indent"] = end_indent_val
             merged[-1]["line_bbox"] = (new_x0, new_y0, new_x1, new_y1)
             merged[-1]["total_bold_chars"] += line["total_bold_chars"]
             merged[-1]["total_nonbold_chars"] += line["total_nonbold_chars"]
             merged[-1]["font_bold"] = merged[-1]["total_bold_chars"] > merged[-1]["total_nonbold_chars"]
             merged[-1]["font_names"].extend(line["font_names"])
             merged[-1]["font_names"] = list(set(merged[-1]["font_names"]))
-            print('合并后的indent', merged[-1]["indent"])
+            # print('合并后的indent', merged[-1]["indent"])
             merged_this_round = True
+
+
 
         if merged_this_round:
             # 合并成功，i不递增，下一轮继续用当前prev_line和下一行比较
@@ -433,8 +543,8 @@ def is_math(font_info_list, text_len, text, font_size):
     # 用于去除空格计算长度
     text_length_nospaces = len(text.replace(" ", ""))
 
-    # 若行整体文本长度很短，且字体集合与“数学字体”有交集，则直接视为 math
-    if text_length_nospaces < font_size * 3.3:
+    # 若行整体文本长度很短，且字体集合与“数学字体”有交集，则直接视为 math.暂时改为1.0
+    if text_length_nospaces < font_size * 1.0:
         font_set = set(font_info_list)
         if font_set & MATH_FONTS_SET:
             # print('math,', text)
@@ -750,6 +860,7 @@ def get_new_blocks(page, pdf_path=None, page_num=None):
                     "type": "plain_text",  # 初始行类型
                     "font_bold": line_is_bold,
                     "indent": 0,
+                    "end_indent": 0,
                     "total_bold_chars": tb,
                     "total_nonbold_chars": tnb
                 }
@@ -774,7 +885,8 @@ def get_new_blocks(page, pdf_path=None, page_num=None):
             merged_horizontally,
             check_font_size=False,
             check_font_name=False,
-            check_font_color=False
+            check_font_color=False,
+            check_same_block=False
         )
 
         # ============= (3) 基于合并后行信息，构建临时数据结构 =============
@@ -820,7 +932,7 @@ def get_new_blocks(page, pdf_path=None, page_num=None):
         # ============= (5) 对相邻 math 行进行二次合并 =============
         merged_final = merge_adjacent_math_lines(merged_final)
 
-        # ============= (6) 打印结果并构造返回值 =============
+        # ============= (6) 打印结果并构造返回值 ============= 115行
         new_blocks = []
         for idx, line_info in enumerate(merged_final, start=1):
             # print(f"行 {idx}:")
@@ -834,6 +946,7 @@ def get_new_blocks(page, pdf_path=None, page_num=None):
             # print(f" 旋转角度(rotation_angle): {line_info['rotation_angle']}°")
             # print(f" 字体加粗(font_bold): {line_info['font_bold']}")
             # print(f" 缩进(indent): {line_info['indent']}")
+            # print(f" 末尾缩进(indent): {line_info['end_indent']}")
             # print(f" total_bold_chars = {line_info['total_bold_chars']}, total_nonbold_chars = {line_info['total_nonbold_chars']}")
             # print(f" 行类型(type): {line_info['type']}")
             # print("-" * 50)
@@ -848,7 +961,8 @@ def get_new_blocks(page, pdf_path=None, page_num=None):
                     line_info['font_color'],
                     line_info['indent'],
                     line_info['font_bold'],
-                    line_info['font_size']
+                    line_info['font_size'],
+                    line_info['end_indent']
                 ])
 
         return new_blocks
@@ -859,8 +973,8 @@ def get_new_blocks(page, pdf_path=None, page_num=None):
 
 if __name__ == "__main__":
     b = datetime.datetime.now()
-    pdf_path = "g2.pdf"  # 换成你的 PDF 文件路径
-    page_number = 2 # 换成想处理的页码
+    pdf_path = "m2.pdf"  # 换成你的 PDF 文件路径
+    page_number = 4 # 换成想处理的页码
     z = get_new_blocks(page=None, pdf_path=pdf_path, page_num=page_number)
     print("最终返回的 new_blocks:", z)
     e = datetime.datetime.now()
